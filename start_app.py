@@ -51,7 +51,7 @@ def main():
         print("⚠️  未找到 .env 文件，请创建并配置 DASHSCOPE_API_KEY")
     
     print("📋 服务信息:")
-    print("  - Flask 后端: http://localhost:5000")
+    print("  - Flask 后端: http://localhost:5001")
     print("  - Streamlit 前端: http://localhost:8501")
     print("  - 按 Ctrl+C 停止所有服务")
     print()

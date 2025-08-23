@@ -11,10 +11,7 @@ import threading
 import time
 from datetime import datetime
 import base64
-import signal
-import sys
 import pyaudio
-import contextlib
 from dashscope.audio.qwen_omni import *
 
 # 加载环境变量
@@ -34,12 +31,15 @@ logger = logging.getLogger(__name__)
 latest_analysis = {
     "timestamp": None,
     "question": None,
-    "explanation": None,
-    "suggestion": None,
     "is_violation": None,
     "violation_type": None,
+    "explanation": None,
+    "suggestion": None,
     "binary_signal": None
 }
+
+# 全局变量存储所有分析历史
+analysis_history = []
 
 # VAD 全局变量
 vad_conversation = None
@@ -53,33 +53,118 @@ class LLMService:
         if not self.api_key:
             logger.error("DashScope API Key not found in environment variables")
     
-    def analyze_text(self, prompt, user_input):
-        """分析文本并返回结果"""
+    def analyze_text(self, text):
+        """使用网球场理论分析文本"""
         if not self.api_key:
             return {
                 "success": False,
                 "error": "API Key not configured"
             }
         
-        full_prompt = f"{prompt}\n\n用户输入：{user_input}"
+        # 验证输入文本
+        if text is None:
+            return {
+                "success": False,
+                "error": "Text input cannot be None"
+            }
+        
+        # 确保text是字符串
+        text = str(text).strip()
+        if not text:
+            return {
+                "success": False,
+                "error": "Text input cannot be empty"
+            }
+        
+        prompt = f"""你是一个专门基于人际关系网球场理论进行沟通分析的AI助手。你的核心任务是判断对话中最新一条消息的发送者是否"越网"。
+
+核心理论框架：
+**网球场理论**：在人际沟通中，每个人应该待在自己的"半场"，只谈论自己的感受和观察到的行为，不要跨过"网"去猜测对方的动机或内心想法。
+
+判断标准：
+✅ 未越网（合规表达）
+* 使用"我"的表达：描述自己的感受、想法、观察
+* 陈述可观察的事实行为
+* 表达自己的需求和边界
+* 分享自己的体验和感受
+* 询问而非假设对方的想法
+
+❌ 越网（违规表达）
+* 使用"你"的判断：对他人动机进行推测
+* 解释他人行为背后的原因
+* 对他人内心状态做假设性判断
+* 代替他人表达感受或想法
+* 将自己的推测当作事实陈述
+
+请分析以下文本："{text}"
+
+请返回JSON格式结果：
+{{
+    "is_violation": true/false,
+    "violation_type": "assumption/judgment/mind_reading/generalization/none",
+    "explanation": "详细解释为什么越网或未越网",
+    "suggestion": "如果越网，提供改进建议"
+}}"""
         
         try:
             response = Generation.call(
                 model='qwen-turbo',
-                prompt=full_prompt
+                prompt=prompt
             )
             
             if response.status_code == HTTPStatus.OK:
                 llm_response = response.output['text']
-                hardware_command = self._extract_hardware_command(llm_response)
                 
-                return {
-                    "success": True,
-                    "llm_response": llm_response,
-                    "hardware_command": hardware_command,
-                    "user_input": user_input,
-                    "prompt": prompt
-                }
+                try:
+                    # 解析JSON响应
+                    response_data = json.loads(llm_response)
+                    is_violation = response_data.get("is_violation", False)
+                    binary_signal = "1" if is_violation else "0"
+                    
+                    # 创建分析结果
+                    analysis_result = {
+                        "timestamp": datetime.now().isoformat(),
+                        "question": text,
+                        "is_violation": is_violation,
+                        "violation_type": response_data.get("violation_type", "none"),
+                        "explanation": response_data.get("explanation", ""),
+                        "suggestion": response_data.get("suggestion", ""),
+                        "binary_signal": binary_signal
+                    }
+                    
+                    # 更新全局分析结果
+                    global latest_analysis, analysis_history
+                    latest_analysis.update(analysis_result)
+                    
+                    # 添加到历史记录
+                    analysis_history.append(analysis_result.copy())
+                    
+                    # 记录到文件
+                    with open("output.log", "a", encoding='utf-8') as f:
+                        f.write(f"question: {text}\n")
+                        f.write(f"LLM Response: {llm_response}\n")
+                        f.write(f"{binary_signal}======RESPONSE DONE======\n")
+                    
+                    with open("binary_output.log", "a") as f:
+                        f.write(binary_signal + "\n")
+                    
+                    return {
+                        "success": True,
+                        "is_violation": is_violation,
+                        "violation_type": response_data.get("violation_type", "none"),
+                        "explanation": response_data.get("explanation", ""),
+                        "suggestion": response_data.get("suggestion", ""),
+                        "binary_signal": binary_signal,
+                        "llm_response": llm_response
+                    }
+                    
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse LLM response as JSON")
+                    return {
+                        "success": False,
+                        "error": "Failed to parse LLM response"
+                    }
+                    
             else:
                 return {
                     "success": False,
@@ -91,28 +176,6 @@ class LLMService:
                 "success": False,
                 "error": f"Request failed: {str(e)}"
             }
-    
-    def _extract_hardware_command(self, llm_response):
-        """从 LLM 响应中提取硬件控制指令"""
-        response_lower = llm_response.lower()
-        
-        # 检查明确的开启指令
-        if ('1' in response_lower and 
-            ('开启' in response_lower or 'on' in response_lower or 
-             '启动' in response_lower or '打开' in response_lower)):
-            return "1"
-        
-        # 检查明确的关闭指令
-        elif ('0' in response_lower and 
-              ('关闭' in response_lower or 'off' in response_lower or 
-               '停止' in response_lower or '关掉' in response_lower)):
-            return "0"
-        
-        # 简单的数字检查
-        elif '1' in llm_response:
-            return "1"
-        else:
-            return "0"
 
 class LogMonitorService:
     def __init__(self):
@@ -302,8 +365,8 @@ class VADCallback(OmniRealtimeCallback):
                     binary_signal = "1" if is_violation else "0"
                     logger.info(f"VAD Binary signal: {binary_signal}")
                     
-                    # 更新全局分析结果
-                    latest_analysis.update({
+                    # 创建分析结果
+                    analysis_result = {
                         "timestamp": datetime.now().isoformat(),
                         "question": transcript,
                         "explanation": response_data.get("explanation"),
@@ -311,7 +374,14 @@ class VADCallback(OmniRealtimeCallback):
                         "is_violation": is_violation,
                         "violation_type": response_data.get("violation_type"),
                         "binary_signal": binary_signal
-                    })
+                    }
+                    
+                    # 更新全局分析结果
+                    global analysis_history
+                    latest_analysis.update(analysis_result)
+                    
+                    # 添加到历史记录
+                    analysis_history.append(analysis_result.copy())
                     
                     # 记录到文件（保持兼容性）
                     with open("binary_output.log", "a") as f:
@@ -423,21 +493,16 @@ vad_service = VADService()
 def root():
     """根路由"""
     return jsonify({
-        "message": "语音转文本 & LLM 分析系统 API",
+        "message": "网球场理论分析系统 API",
         "version": "1.0.0",
         "endpoints": {
             "health": "/api/health",
             "analyze": "/api/analyze",
-            "hardware": "/api/hardware/command",
-            "transcribe": "/api/audio/transcribe",
             "latest_analysis": "/api/analysis/latest",
-            "start_monitoring": "/api/monitoring/start",
-            "stop_monitoring": "/api/monitoring/stop",
             "start_vad": "/api/vad/start",
             "stop_vad": "/api/vad/stop",
             "vad_status": "/api/vad/status"
-        },
-        "frontend": "http://localhost:8501"
+        }
     })
 
 @app.route('/api/health', methods=['GET'])
@@ -450,7 +515,7 @@ def health_check():
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze_text():
-    """文本分析接口"""
+    """文本分析接口 - 网球场理论分析"""
     try:
         data = request.get_json()
         
@@ -458,12 +523,11 @@ def analyze_text():
             return jsonify({"success": False, "error": "No JSON data provided"}), 400
         
         user_input = data.get('text', '').strip()
-        prompt = data.get('prompt', '请分析以下文本内容，如果内容表示需要开启设备，请回复"1"，否则回复"0"：')
         
         if not user_input:
             return jsonify({"success": False, "error": "Text input is required"}), 400
         
-        result = llm_service.analyze_text(prompt, user_input)
+        result = llm_service.analyze_text(user_input)
         
         if result["success"]:
             return jsonify(result)
@@ -474,39 +538,7 @@ def analyze_text():
         logger.error(f"Analyze endpoint error: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/hardware/command', methods=['POST'])
-def send_hardware_command():
-    """发送硬件控制指令"""
-    try:
-        data = request.get_json()
-        command = data.get('command', '0')
-        
-        # 这里可以添加实际的硬件控制逻辑
-        # 例如：发送到 MQTT、串口通信等
-        
-        logger.info(f"Hardware command sent: {command}")
-        
-        return jsonify({
-            "success": True,
-            "command": command,
-            "message": f"Hardware command '{command}' sent successfully"
-        })
-        
-    except Exception as e:
-        logger.error(f"Hardware command error: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/audio/transcribe', methods=['POST'])
-def transcribe_audio():
-    """音频转文本接口（占位符）"""
-    # 这里可以集成实际的语音识别服务
-    # 例如：使用 OpenAI Whisper、百度语音识别等
-    
-    return jsonify({
-        "success": True,
-        "transcribed_text": "这是模拟的语音转文本结果",
-        "message": "Audio transcription feature is not implemented yet"
-    })
 
 @app.route('/api/analysis/latest', methods=['GET'])
 def get_latest_analysis():
@@ -524,82 +556,29 @@ def get_latest_analysis():
         "data": latest_analysis
     })
 
-@app.route('/api/analysis/explanation', methods=['GET'])
-def get_explanation():
-    """获取最新的解释"""
-    global latest_analysis
-    
-    if latest_analysis["explanation"] is None:
-        return jsonify({
-            "success": False,
-            "message": "No explanation available"
-        }), 404
+@app.route('/api/analysis/history', methods=['GET'])
+def get_analysis_history():
+    """获取所有分析历史记录"""
+    global analysis_history
     
     return jsonify({
         "success": True,
-        "explanation": latest_analysis["explanation"],
-        "question": latest_analysis["question"],
-        "timestamp": latest_analysis["timestamp"]
+        "data": analysis_history,
+        "count": len(analysis_history)
     })
 
-@app.route('/api/analysis/suggestion', methods=['GET'])
-def get_suggestion():
-    """获取最新的建议"""
-    global latest_analysis
-    
-    if latest_analysis["suggestion"] is None:
-        return jsonify({
-            "success": False,
-            "message": "No suggestion available"
-        }), 404
+@app.route('/api/analysis/history', methods=['DELETE'])
+def clear_analysis_history():
+    """清空分析历史记录"""
+    global analysis_history
+    analysis_history.clear()
     
     return jsonify({
         "success": True,
-        "suggestion": latest_analysis["suggestion"],
-        "question": latest_analysis["question"],
-        "timestamp": latest_analysis["timestamp"]
+        "message": "Analysis history cleared"
     })
 
-@app.route('/api/monitoring/start', methods=['POST'])
-def start_monitoring():
-    """启动日志监控"""
-    try:
-        log_monitor.start_monitoring()
-        return jsonify({
-            "success": True,
-            "message": "Log monitoring started successfully"
-        })
-    except Exception as e:
-        logger.error(f"Failed to start monitoring: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
-@app.route('/api/monitoring/stop', methods=['POST'])
-def stop_monitoring():
-    """停止日志监控"""
-    try:
-        log_monitor.stop_monitoring()
-        return jsonify({
-            "success": True,
-            "message": "Log monitoring stopped successfully"
-        })
-    except Exception as e:
-        logger.error(f"Failed to stop monitoring: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-@app.route('/api/monitoring/status', methods=['GET'])
-def monitoring_status():
-    """获取监控状态"""
-    return jsonify({
-        "success": True,
-        "monitoring": log_monitor.monitoring,
-        "has_data": latest_analysis["timestamp"] is not None
-    })
 
 @app.route('/api/vad/start', methods=['POST'])
 def start_vad():
