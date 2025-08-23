@@ -599,6 +599,85 @@ with tab3:
                                     st.text(analysis_result["llm_response"])
                 else:
                     st.info("💡 此数据包未进行模型分析")
+                    
+                    # 如果是文本数据且未分析，提供分析按钮
+                    if selected_item.get("type") == "text" or (isinstance(selected_item.get("data"), str) and not selected_item.get("data", "").startswith("<binary")):
+                        text_data = selected_item.get("data", "")
+                        if text_data and len(text_data.strip()) > 0:
+                            if st.button(f"🔍 分析此数据包", key=f"analyze_{selected_index}"):
+                                with st.spinner("正在分析UDP数据..."):
+                                    # 尝试解析JSON或直接使用文本
+                                    try:
+                                        if text_data.startswith('{'):
+                                            json_data = json.loads(text_data)
+                                            analyze_text_content = json_data.get('text', text_data)
+                                        else:
+                                            analyze_text_content = text_data
+                                    except:
+                                        analyze_text_content = text_data
+                                    
+                                    # 调用分析API
+                                    result = analyze_text(analyze_text_content.strip())
+                                    if result.get("success"):
+                                        # 将分析结果存储到session state中，以便立即显示
+                                        analysis_key = f"udp_analysis_{selected_index}"
+                                        st.session_state[analysis_key] = result
+                                        st.success("✅ 分析完成！")
+                                        st.rerun()  # 刷新页面以显示结果
+                                    else:
+                                        st.error(f"❌ 分析失败: {result.get('error', '未知错误')}")
+                
+                # 检查是否有临时分析结果需要显示
+                analysis_key = f"udp_analysis_{selected_index}"
+                if analysis_key in st.session_state:
+                    st.markdown("---")
+                    st.subheader("🤖 刚完成的分析结果")
+                    
+                    temp_result = st.session_state[analysis_key]
+                    
+                    # 显示分析结果
+                    col1, col2 = st.columns([1, 2])
+                    
+                    with col1:
+                        # 硬件控制指令和状态
+                        binary_signal = temp_result.get("binary_signal", "0")
+                        is_violation = temp_result.get("is_violation", False)
+                        
+                        if is_violation:
+                            st.error(f"🚨 硬件控制指令: {binary_signal}")
+                            st.error("⚠️ 检测到越网行为")
+                        else:
+                            st.success(f"✅ 硬件控制指令: {binary_signal}")
+                            st.success("✅ 未检测到越网行为")
+                        
+                        # 基本分析信息
+                        st.write(f"**分析时间:** {temp_result.get('timestamp', datetime.now().isoformat())[:19]}")
+                        st.write(f"**是否违规:** {'是' if is_violation else '否'}")
+                    
+                    with col2:
+                        # 详细分析结果
+                        violation_type = temp_result.get("violation_type", "none")
+                        explanation = temp_result.get("explanation", "")
+                        suggestion = temp_result.get("suggestion", "")
+                        
+                        st.write(f"**违规类型:** {violation_type}")
+                        st.write(f"**解释:** {explanation}")
+                        if suggestion:
+                            st.write(f"**建议:** {suggestion}")
+                        
+                        # 显示LLM原始响应（如果有的话）
+                        if "llm_response" in temp_result:
+                            with st.expander("查看LLM原始响应"):
+                                try:
+                                    llm_data = json.loads(temp_result["llm_response"])
+                                    st.json(llm_data)
+                                except:
+                                    st.text(temp_result["llm_response"])
+                    
+                    # 提供清除临时结果的按钮
+                    if st.button("✅ 确认查看完毕", key=f"clear_temp_{selected_index}"):
+                        del st.session_state[analysis_key]
+                        st.rerun()
         
         # 清空UDP数据按钮
         if st.button("🗑️ 清空UDP数据历史"):
