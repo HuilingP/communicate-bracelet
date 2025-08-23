@@ -20,6 +20,16 @@ def start_flask_backend():
     except Exception as e:
         print(f"Flask 后端启动失败: {e}")
 
+def start_udp_server():
+    """启动 UDP 服务器"""
+    print("📡 启动 UDP 分析服务器...")
+    try:
+        subprocess.run([sys.executable, "backend_udp_server.py"], check=True)
+    except KeyboardInterrupt:
+        print("UDP 服务器已停止")
+    except Exception as e:
+        print(f"UDP 服务器启动失败: {e}")
+
 def start_streamlit_frontend():
     """启动 Streamlit 前端"""
     print("🌐 启动 Streamlit 前端...")
@@ -52,6 +62,7 @@ def main():
     
     print("📋 服务信息:")
     print("  - Flask 后端: http://localhost:5001")
+    print("  - UDP 分析服务器: udp://localhost:5002")
     print("  - Streamlit 前端: http://localhost:8501")
     print("  - 按 Ctrl+C 停止所有服务")
     print()
@@ -60,6 +71,10 @@ def main():
         # 创建线程启动后端服务
         backend_thread = threading.Thread(target=start_flask_backend, daemon=True)
         backend_thread.start()
+        
+        # 创建线程启动UDP服务器
+        udp_thread = threading.Thread(target=start_udp_server, daemon=True)
+        udp_thread.start()
         
         # 等待后端启动
         time.sleep(3)
