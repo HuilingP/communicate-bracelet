@@ -10,6 +10,12 @@ import logging
 import threading
 import time
 from datetime import datetime
+import base64
+import signal
+import sys
+import pyaudio
+import contextlib
+from dashscope.audio.qwen_omni import *
 
 # 加载环境变量
 load_dotenv()
@@ -34,6 +40,12 @@ latest_analysis = {
     "violation_type": None,
     "binary_signal": None
 }
+
+# VAD 全局变量
+vad_conversation = None
+vad_running = False
+pya = None
+mic_stream = None
 
 class LLMService:
     def __init__(self):
@@ -194,9 +206,218 @@ class LogMonitorService:
             logger.error(f"Error reading binary log: {e}")
         return None
 
+def vad_llm_request(text):
+    """VAD专用的LLM请求 - 网球场理论分析"""
+    prompt = f"""你是一个专门基于人际关系网球场理论进行沟通分析的AI助手。你的核心任务是判断对话中最新一条消息的发送者是否"越网"。
+
+核心理论框架：
+**网球场理论**：在人际沟通中，每个人应该待在自己的"半场"，只谈论自己的感受和观察到的行为，不要跨过"网"去猜测对方的动机或内心想法。
+
+判断标准：
+✅ 未越网（合规表达）
+* 使用"我"的表达：描述自己的感受、想法、观察
+* 陈述可观察的事实行为
+* 表达自己的需求和边界
+* 分享自己的体验和感受
+* 询问而非假设对方的想法
+
+❌ 越网（违规表达）
+* 使用"你"的判断：对他人动机进行推测
+* 解释他人行为背后的原因
+* 对他人内心状态做假设性判断
+* 代替他人表达感受或想法
+* 将自己的推测当作事实陈述
+
+请分析以下文本："{text}"
+
+请返回JSON格式结果：
+{{
+    "is_violation": true/false,
+    "violation_type": "assumption/judgment/mind_reading/generalization/none",
+    "explanation": "详细解释为什么越网或未越网",
+    "suggestion": "如果越网，提供改进建议"
+}}"""
+
+    if not dashscope.api_key:
+        return "DashScope API Key not set. Please check your environment variables."
+
+    try:
+        response = Generation.call(
+            model='qwen-turbo',
+            prompt=prompt
+        )
+
+        if response.status_code == HTTPStatus.OK:
+            return response.output['text']
+        else:
+            return f"Error: {response.code} - {response.message}"
+    except Exception as e:
+        return f"Request failed: {str(e)}"
+
+class VADCallback(OmniRealtimeCallback):
+    def on_open(self) -> None:
+        global pya, mic_stream
+        print('VAD connection opened, init microphone')
+        try:
+            pya = pyaudio.PyAudio()
+            mic_stream = pya.open(format=pyaudio.paInt16,
+                                channels=1,
+                                rate=16000,
+                                input=True)
+            logger.info("VAD microphone initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize microphone: {e}")
+
+    def on_close(self, close_status_code, close_msg) -> None:
+        global pya, mic_stream
+        print(f'VAD connection closed with code: {close_status_code}, msg: {close_msg}')
+        if mic_stream:
+            mic_stream.close()
+        if pya:
+            pya.terminate()
+        logger.info("VAD microphone destroyed")
+
+    def on_event(self, response: str) -> None:
+        try:
+            global latest_analysis, vad_conversation
+            event_type = response['type']
+            
+            if 'session.created' == event_type:
+                logger.info(f'VAD session started: {response["session"]["id"]}')
+            
+            if 'conversation.item.input_audio_transcription.completed' == event_type:
+                transcript = response['transcript']
+                logger.info(f'VAD question: {transcript}')
+
+                # 发送到LLM进行网球场理论分析
+                llm_response = vad_llm_request(transcript)
+                logger.info(f"VAD LLM Response: {llm_response}")
+
+                try:
+                    # 解析LLM的JSON响应
+                    response_data = json.loads(llm_response)
+                    is_violation = response_data.get("is_violation", False)
+                    
+                    # 根据is_violation标志确定二进制信号
+                    binary_signal = "1" if is_violation else "0"
+                    logger.info(f"VAD Binary signal: {binary_signal}")
+                    
+                    # 更新全局分析结果
+                    latest_analysis.update({
+                        "timestamp": datetime.now().isoformat(),
+                        "question": transcript,
+                        "explanation": response_data.get("explanation"),
+                        "suggestion": response_data.get("suggestion"),
+                        "is_violation": is_violation,
+                        "violation_type": response_data.get("violation_type"),
+                        "binary_signal": binary_signal
+                    })
+                    
+                    # 记录到文件（保持兼容性）
+                    with open("binary_output.log", "a") as f:
+                        f.write(binary_signal + "\n")
+                        
+                except json.JSONDecodeError:
+                    logger.error("Error: Failed to decode VAD LLM response as JSON.")
+
+            if 'response.done' == event_type:
+                logger.info('VAD Response done')
+                if vad_conversation:
+                    logger.info(f'[VAD Metric] response: {vad_conversation.get_last_response_id()}, '
+                              f'first text delay: {vad_conversation.get_last_first_text_delay()}, '
+                              f'first audio delay: {vad_conversation.get_last_first_audio_delay()}')
+                              
+        except Exception as e:
+            logger.error(f'[VAD Error] {e}')
+
+class VADService:
+    def __init__(self):
+        self.callback = VADCallback()
+        self.conversation = None
+        self.running = False
+        self.vad_thread = None
+        
+    def start_vad(self):
+        """启动VAD服务"""
+        if self.running:
+            return {"success": False, "message": "VAD already running"}
+            
+        try:
+            global vad_conversation, vad_running
+            
+            self.conversation = OmniRealtimeConversation(
+                model='qwen-omni-turbo-realtime-latest',
+                callback=self.callback,
+            )
+            
+            vad_conversation = self.conversation
+            self.conversation.connect()
+            self.conversation.update_session(
+                output_modalities=[MultiModality.TEXT],
+                voice='Chelsie',
+                input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                enable_input_audio_transcription=True,
+                input_audio_transcription_model='gummy-realtime-v1',
+                enable_turn_detection=True,
+                turn_detection_type='server_vad',
+            )
+            
+            self.running = True
+            vad_running = True
+            
+            # 启动音频处理线程
+            self.vad_thread = threading.Thread(target=self._audio_loop, daemon=True)
+            self.vad_thread.start()
+            
+            logger.info("VAD service started successfully")
+            return {"success": True, "message": "VAD service started"}
+            
+        except Exception as e:
+            logger.error(f"Failed to start VAD service: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def stop_vad(self):
+        """停止VAD服务"""
+        try:
+            global vad_running
+            self.running = False
+            vad_running = False
+            
+            if self.conversation:
+                self.conversation.close()
+                self.conversation = None
+                
+            if self.vad_thread:
+                self.vad_thread.join(timeout=2)
+                
+            logger.info("VAD service stopped")
+            return {"success": True, "message": "VAD service stopped"}
+            
+        except Exception as e:
+            logger.error(f"Failed to stop VAD service: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _audio_loop(self):
+        """音频处理循环"""
+        global mic_stream
+        
+        while self.running:
+            try:
+                if mic_stream and self.conversation:
+                    audio_data = mic_stream.read(3200, exception_on_overflow=False)
+                    audio_b64 = base64.b64encode(audio_data).decode('ascii')
+                    self.conversation.append_audio(audio_b64)
+                else:
+                    time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Audio loop error: {e}")
+                break
+
 # 初始化服务
 llm_service = LLMService()
 log_monitor = LogMonitorService()
+vad_service = VADService()
 
 @app.route('/', methods=['GET'])
 def root():
@@ -211,7 +432,10 @@ def root():
             "transcribe": "/api/audio/transcribe",
             "latest_analysis": "/api/analysis/latest",
             "start_monitoring": "/api/monitoring/start",
-            "stop_monitoring": "/api/monitoring/stop"
+            "stop_monitoring": "/api/monitoring/stop",
+            "start_vad": "/api/vad/start",
+            "stop_vad": "/api/vad/stop",
+            "vad_status": "/api/vad/status"
         },
         "frontend": "http://localhost:8501"
     })
@@ -377,8 +601,50 @@ def monitoring_status():
         "has_data": latest_analysis["timestamp"] is not None
     })
 
+@app.route('/api/vad/start', methods=['POST'])
+def start_vad():
+    """启动VAD服务"""
+    try:
+        result = vad_service.start_vad()
+        if result["success"]:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"Failed to start VAD: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/vad/stop', methods=['POST'])
+def stop_vad():
+    """停止VAD服务"""
+    try:
+        result = vad_service.stop_vad()
+        if result["success"]:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"Failed to stop VAD: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/vad/status', methods=['GET'])
+def vad_status():
+    """获取VAD状态"""
+    return jsonify({
+        "success": True,
+        "vad_running": vad_service.running,
+        "has_data": latest_analysis["timestamp"] is not None,
+        "latest_analysis": latest_analysis if latest_analysis["timestamp"] else None
+    })
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5001))
     debug = os.environ.get('DEBUG', 'False').lower() == 'true'
     
     logger.info(f"Starting Flask server on port {port}")

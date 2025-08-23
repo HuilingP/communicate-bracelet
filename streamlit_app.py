@@ -24,7 +24,7 @@ st.set_page_config(
 )
 
 # Backend API 配置
-BACKEND_URL = "http://localhost:5000"
+BACKEND_URL = "http://localhost:5001"
 
 # 初始化 session state
 if 'transcribed_text' not in st.session_state:
@@ -108,6 +108,32 @@ def get_monitoring_status():
     """获取监控状态"""
     try:
         response = requests.get(f"{BACKEND_URL}/api/monitoring/status", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
+def start_vad():
+    """启动VAD服务"""
+    try:
+        response = requests.post(f"{BACKEND_URL}/api/vad/start", timeout=10)
+        return response.status_code == 200
+    except:
+        return False
+
+def stop_vad():
+    """停止VAD服务"""
+    try:
+        response = requests.post(f"{BACKEND_URL}/api/vad/stop", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_vad_status():
+    """获取VAD状态"""
+    try:
+        response = requests.get(f"{BACKEND_URL}/api/vad/status", timeout=5)
         if response.status_code == 200:
             return response.json()
         return None
@@ -209,41 +235,42 @@ with st.sidebar:
         st.success("✅ 后端API连接正常")
     else:
         st.error("❌ 后端API连接失败")
-        st.info("请确保后端服务运行在 http://localhost:5000")
+        st.info("请确保后端服务运行在 http://localhost:5001")
     
-    # 监控状态
-    st.subheader("📊 VAD监控状态")
-    monitoring_status = get_monitoring_status()
+    # VAD服务状态
+    st.subheader("🎯 VAD语音分析服务")
+    vad_status = get_vad_status()
     
-    if monitoring_status and monitoring_status.get("success"):
-        is_monitoring = monitoring_status.get("monitoring", False)
-        has_data = monitoring_status.get("has_data", False)
+    if vad_status and vad_status.get("success"):
+        is_vad_running = vad_status.get("vad_running", False)
+        has_data = vad_status.get("has_data", False)
         
-        if is_monitoring:
-            st.success("🟢 VAD监控运行中")
-            if st.button("⏹️ 停止监控"):
-                if stop_monitoring():
-                    st.session_state.monitoring_active = False
-                    st.success("监控已停止")
-                    st.rerun()
-                else:
-                    st.error("停止监控失败")
+        if is_vad_running:
+            st.success("🟢 VAD服务运行中")
+            st.info("🎤 正在监听语音输入...")
+            if st.button("⏹️ 停止VAD服务"):
+                with st.spinner("正在停止VAD服务..."):
+                    if stop_vad():
+                        st.success("VAD服务已停止")
+                        st.rerun()
+                    else:
+                        st.error("停止VAD服务失败")
         else:
-            st.info("⚪ VAD监控未运行")
-            if st.button("▶️ 启动监控"):
-                if start_monitoring():
-                    st.session_state.monitoring_active = True
-                    st.success("监控已启动")
-                    st.rerun()
-                else:
-                    st.error("启动监控失败")
+            st.info("⚪ VAD服务未运行")
+            if st.button("▶️ 启动VAD服务"):
+                with st.spinner("正在启动VAD服务..."):
+                    if start_vad():
+                        st.success("VAD服务已启动")
+                        st.rerun()
+                    else:
+                        st.error("启动VAD服务失败")
         
         if has_data:
             st.info("📊 有可用的分析数据")
         else:
             st.warning("📊 暂无分析数据")
     else:
-        st.error("无法获取监控状态")
+        st.error("无法获取VAD服务状态")
     
     st.divider()
     
