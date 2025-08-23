@@ -490,12 +490,22 @@ with tab3:
             # 准备表格数据
             table_data = []
             for i, item in enumerate(reversed(recent_data)):
+                # 检查是否有分析结果
+                analysis_status = "未分析"
+                if "analysis_result" in item:
+                    analysis_result = item.get("analysis_result", {})
+                    if analysis_result.get("is_violation"):
+                        analysis_status = "🚨 越网"
+                    else:
+                        analysis_status = "✅ 正常"
+                
                 table_data.append({
                     "序号": len(recent_data) - i,
                     "时间": item.get("timestamp", "N/A")[:19],
                     "源地址": item.get("source_ip", "N/A"),
                     "源端口": item.get("source_port", "N/A"),
                     "数据长度": len(str(item.get("data", ""))),
+                    "分析状态": analysis_status,
                     "数据预览": str(item.get("data", ""))[:50] + "..." if len(str(item.get("data", ""))) > 50 else str(item.get("data", ""))
                 })
             
@@ -541,6 +551,54 @@ with tab3:
                     except:
                         # 如果不是JSON，显示为文本
                         st.code(str(data_content), language="text")
+                
+                # 显示模型分析结果（如果有的话）
+                if "analysis_result" in selected_item:
+                    st.markdown("---")
+                    st.subheader("🤖 模型分析结果")
+                    
+                    analysis_result = selected_item.get("analysis_result", {})
+                    
+                    # 创建两列布局显示分析结果
+                    col1, col2 = st.columns([1, 2])
+                    
+                    with col1:
+                        # 硬件控制指令和状态
+                        binary_signal = analysis_result.get("binary_signal", "0")
+                        is_violation = analysis_result.get("is_violation", False)
+                        
+                        if is_violation:
+                            st.error(f"🚨 硬件控制指令: {binary_signal}")
+                            st.error("⚠️ 检测到越网行为")
+                        else:
+                            st.success(f"✅ 硬件控制指令: {binary_signal}")
+                            st.success("✅ 未检测到越网行为")
+                        
+                        # 基本分析信息
+                        st.write(f"**分析时间:** {analysis_result.get('timestamp', 'N/A')[:19]}")
+                        st.write(f"**是否违规:** {'是' if is_violation else '否'}")
+                    
+                    with col2:
+                        # 详细分析结果
+                        violation_type = analysis_result.get("violation_type", "none")
+                        explanation = analysis_result.get("explanation", "")
+                        suggestion = analysis_result.get("suggestion", "")
+                        
+                        st.write(f"**违规类型:** {violation_type}")
+                        st.write(f"**解释:** {explanation}")
+                        if suggestion:
+                            st.write(f"**建议:** {suggestion}")
+                        
+                        # 显示LLM原始响应（如果有的话）
+                        if "llm_response" in analysis_result:
+                            with st.expander("查看LLM原始响应"):
+                                try:
+                                    llm_data = json.loads(analysis_result["llm_response"])
+                                    st.json(llm_data)
+                                except:
+                                    st.text(analysis_result["llm_response"])
+                else:
+                    st.info("💡 此数据包未进行模型分析")
         
         # 清空UDP数据按钮
         if st.button("🗑️ 清空UDP数据历史"):

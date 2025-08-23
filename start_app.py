@@ -52,7 +52,7 @@ def main():
     
     print("📋 服务信息:")
     print("  - Flask 后端API: http://localhost:5001")
-    print("  - UDP 分析服务器: udp://localhost:5002 (集成在API中)")
+    print("  - UDP 分析服务器: udp://0.0.0.0:5002 (集成在API中)")
     print("  - Streamlit Web界面: http://localhost:8501")
     print("  - 按 Ctrl+C 停止所有服务")
     print()
