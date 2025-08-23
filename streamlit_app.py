@@ -266,7 +266,7 @@ with st.sidebar:
         refresh_interval = st.slider("刷新间隔(秒)", 1, 10, 3)
 
 # 主内容区域
-tab1, tab2, tab3, tab4 = st.tabs(["📝 文本分析", "� 实时语音", "语📡 UDP数据", "⚙, "📡 UDP数据", "⚙️ 设置"])
+tab1, tab2, tab3, tab4 = st.tabs(["📝 文本分析", "� 实时语音",  "📡 UDP数据", "⚙️ 设置"])
 
 with tab1:
     st.header("📝 文本分析")
@@ -373,41 +373,9 @@ with tab2:
     else:
         st.warning("⚠️ 请先在侧边栏启动语音识别服务")
         st.info("启动后，系统将自动识别您的语音并进行网球场理论分析")
+ 
 
 with tab3:
-    st.header("📊 分析历史")
-    
-    if st.session_state.analysis_history:
-        # 显示历史记录统计
-        total_analyses = len(st.session_state.analysis_history)
-        violations = sum(1 for item in st.session_state.analysis_history 
-                        if item["result"].get("is_violation", False))
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("总分析次数", total_analyses)
-        with col2:
-            st.metric("越网次数", violations)
-        with col3:
-            violation_rate = (violations / total_analyses * 100) if total_analyses > 0 else 0
-            st.metric("越网率", f"{violation_rate:.1f}%")
-        
-        st.markdown("---")
-        
-        # 显示历史记录
-        for i, item in enumerate(reversed(st.session_state.analysis_history)):
-            with st.expander(f"分析 #{total_analyses - i} - {item['timestamp'][:19]}"):
-                st.write(f"**输入文本:** {item['input']}")
-                display_analysis_result(item['result'])
-        
-        # 清空历史记录
-        if st.button("🗑️ 清空历史记录"):
-            st.session_state.analysis_history = []
-            st.rerun()
-    else:
-        st.info("暂无分析历史记录")
-
-with tab4:
     st.header("📡 UDP数据监控")
     
     # UDP服务器状态
@@ -541,7 +509,7 @@ with tab4:
         st.write("- 有客户端正在发送数据")
         st.write("- 后端API正常运行")
 
-with tab5:
+with tab4:
     st.header("⚙️ 系统设置")
     
     # 提示词设置
