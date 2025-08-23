@@ -778,7 +778,12 @@ with tab4:
     
     # UDP通知设置
     st.subheader("📡 UDP通知设置")
-    st.info("当检测到越网行为时，系统会自动发送UDP通知消息 '-blue'")
+    
+    # 初始化通知消息的session state
+    if 'notification_message' not in st.session_state:
+        st.session_state.notification_message = "-blue"
+    
+    st.info(f"当检测到越网行为时，系统会自动发送UDP通知消息 '{st.session_state.notification_message}'")
     
     # 获取当前UDP通知配置
     udp_config = get_udp_notification_config()
@@ -812,12 +817,22 @@ with tab4:
                 help="接收UDP通知的目标端口号"
             )
         
+        # 通知消息配置
+        notification_message = st.text_input(
+            "通知消息:",
+            value=st.session_state.notification_message,
+            help="检测到越网行为时发送的UDP通知消息"
+        )
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
             if st.form_submit_button("💾 保存配置", type="primary"):
+                # 保存UDP配置
                 result = set_udp_notification_config(notification_host, notification_port)
                 if result.get("success"):
+                    # 保存通知消息到session state
+                    st.session_state.notification_message = notification_message
                     st.success("UDP通知配置已保存")
                     st.rerun()
                 else:
@@ -826,7 +841,7 @@ with tab4:
         with col2:
             if st.form_submit_button("🧪 测试通知"):
                 with st.spinner("正在发送测试通知..."):
-                    result = test_udp_notification("-blue")
+                    result = test_udp_notification(notification_message)
                     if result.get("success"):
                         st.success(f"测试通知发送成功！\n消息: {result.get('sent_message')}")
                     else:
@@ -839,7 +854,7 @@ with tab4:
     # 显示当前配置状态
     st.write("**当前UDP通知配置:**")
     st.write(f"- 目标地址: `{current_host}:{current_port}`")
-    st.write(f"- 通知消息: `-blue`")
+    st.write(f"- 通知消息: `{st.session_state.notification_message}`")
     st.write(f"- 触发条件: 检测到越网行为 (binary_signal = '1')")
     
     st.markdown("---")
