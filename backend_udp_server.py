@@ -77,10 +77,10 @@ class UDPAnalysisServer:
             # Base64编码音频数据
             audio_b64 = base64.b64encode(audio_data).decode('ascii')
             
-            # 检查连接状态并重连
-            if not self.conversation or not hasattr(self.conversation, '_ws') or self.conversation._ws is None:
-                logger.info("Audio connection lost, attempting to reconnect...")
-                self.start_audio_session()
+            # # 检查连接状态并重连
+            # if not self.conversation or not hasattr(self.conversation, '_ws') or self.conversation._ws is None:
+            #     logger.info("Audio connection lost, attempting to reconnect...")
+            #     self.start_audio_session()
             
             # 发送到语音识别服务
             if self.conversation:
@@ -227,6 +227,8 @@ class UDPAnalysisServer:
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.bind((self.host, self.port))
+            # 设置socket超时，让recvfrom不会无限阻塞
+            self.socket.settimeout(1.0)
             self.running = True
             
             # 启动音频会话
@@ -247,6 +249,9 @@ class UDPAnalysisServer:
                     )
                     thread.start()
                     
+                except socket.timeout:
+                    # 超时是正常的，继续循环检查 self.running
+                    continue
                 except socket.error as e:
                     if self.running:
                         logger.error(f"Socket error: {e}")
