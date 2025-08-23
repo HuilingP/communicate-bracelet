@@ -393,6 +393,10 @@ class VADCallback(OmniRealtimeCallback):
                     # 记录到文件（保持兼容性）
                     with open("binary_output.log", "a") as f:
                         f.write(binary_signal + "\n")
+                    
+                    # 如果检测到违规，发送UDP通知
+                    if binary_signal == "1":
+                        send_udp_notification("-blue")
                         
                 except json.JSONDecodeError:
                     logger.error("Error: Failed to decode VAD LLM response as JSON.")
@@ -799,6 +803,28 @@ class VADService:
                 logger.error(f"Audio loop error: {e}")
                 break
 
+# UDP通知配置
+UDP_NOTIFICATION_HOST = "127.0.0.1"  # 默认地址，可通过API配置
+UDP_NOTIFICATION_PORT = 5003  # 默认端口，可通过API配置
+
+def send_udp_notification(message):
+    """发送UDP通知消息"""
+    try:
+        # 创建UDP socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1.0)  # 1秒超时
+        
+        # 发送消息
+        sock.sendto(message.encode('utf-8'), (UDP_NOTIFICATION_HOST, UDP_NOTIFICATION_PORT))
+        sock.close()
+        
+        logger.info(f"UDP notification sent to {UDP_NOTIFICATION_HOST}:{UDP_NOTIFICATION_PORT}: {message}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send UDP notification: {e}")
+        return False
+
 # 初始化服务
 llm_service = LLMService()
 log_monitor = LogMonitorService()
@@ -822,7 +848,9 @@ def root():
             "start_udp": "/api/udp/start",
             "stop_udp": "/api/udp/stop",
             "udp_status": "/api/udp/status",
-            "udp_data": "/api/udp/data"
+            "udp_data": "/api/udp/data",
+            "udp_notification_config": "/api/udp/notification/config",
+            "udp_notification_test": "/api/udp/notification/test"
         }
     })
 
@@ -851,6 +879,10 @@ def analyze_text():
         result = llm_service.analyze_text(user_input)
         
         if result["success"]:
+            # 如果检测到违规（binary_signal为"1"），发送UDP消息
+            if result.get("binary_signal") == "1":
+                send_udp_notification("-blue")
+            
             return jsonify(result)
         else:
             return jsonify(result), 500
@@ -1046,6 +1078,80 @@ def clear_udp_data():
         "success": True,
         "message": "UDP data history cleared"
     })
+
+@app.route('/api/udp/notification/config', methods=['GET'])
+def get_udp_notification_config():
+    """获取UDP通知配置"""
+    global UDP_NOTIFICATION_HOST, UDP_NOTIFICATION_PORT
+    
+    return jsonify({
+        "success": True,
+        "config": {
+            "host": UDP_NOTIFICATION_HOST,
+            "port": UDP_NOTIFICATION_PORT
+        }
+    })
+
+@app.route('/api/udp/notification/config', methods=['POST'])
+def set_udp_notification_config():
+    """设置UDP通知配置"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+        
+        global UDP_NOTIFICATION_HOST, UDP_NOTIFICATION_PORT
+        
+        # 更新配置
+        if 'host' in data:
+            UDP_NOTIFICATION_HOST = data['host']
+        
+        if 'port' in data:
+            try:
+                UDP_NOTIFICATION_PORT = int(data['port'])
+            except ValueError:
+                return jsonify({"success": False, "error": "Port must be a valid integer"}), 400
+        
+        logger.info(f"UDP notification config updated: {UDP_NOTIFICATION_HOST}:{UDP_NOTIFICATION_PORT}")
+        
+        return jsonify({
+            "success": True,
+            "message": "UDP notification config updated",
+            "config": {
+                "host": UDP_NOTIFICATION_HOST,
+                "port": UDP_NOTIFICATION_PORT
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error updating UDP notification config: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/udp/notification/test', methods=['POST'])
+def test_udp_notification():
+    """测试UDP通知发送"""
+    try:
+        data = request.get_json()
+        message = data.get('message', '-blue') if data else '-blue'
+        
+        success = send_udp_notification(message)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"Test notification sent successfully to {UDP_NOTIFICATION_HOST}:{UDP_NOTIFICATION_PORT}",
+                "sent_message": message
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Failed to send test notification"
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error testing UDP notification: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))

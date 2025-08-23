@@ -175,6 +175,35 @@ def stop_udp_server():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def get_udp_notification_config():
+    """获取UDP通知配置"""
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/udp/notification/config", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": "Failed to get config"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def set_udp_notification_config(host, port):
+    """设置UDP通知配置"""
+    try:
+        payload = {"host": host, "port": port}
+        response = requests.post(f"{API_BASE_URL}/api/udp/notification/config", json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def test_udp_notification(message="-blue"):
+    """测试UDP通知发送"""
+    try:
+        payload = {"message": message}
+        response = requests.post(f"{API_BASE_URL}/api/udp/notification/test", json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 def display_analysis_result(result):
     """显示分析结果"""
     if not result or not result.get("success"):
@@ -747,6 +776,74 @@ with tab4:
     
     st.markdown("---")
     
+    # UDP通知设置
+    st.subheader("📡 UDP通知设置")
+    st.info("当检测到越网行为时，系统会自动发送UDP通知消息 '-blue'")
+    
+    # 获取当前UDP通知配置
+    udp_config = get_udp_notification_config()
+    
+    if udp_config.get("success"):
+        current_config = udp_config.get("config", {})
+        current_host = current_config.get("host", "127.0.0.1")
+        current_port = current_config.get("port", 5003)
+    else:
+        current_host = "127.0.0.1"
+        current_port = 5003
+        st.warning("无法获取当前UDP通知配置，使用默认值")
+    
+    # UDP通知配置表单
+    with st.form("udp_notification_config"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            notification_host = st.text_input(
+                "目标主机地址:",
+                value=current_host,
+                help="接收UDP通知的目标主机IP地址"
+            )
+        
+        with col2:
+            notification_port = st.number_input(
+                "目标端口:",
+                min_value=1,
+                max_value=65535,
+                value=current_port,
+                help="接收UDP通知的目标端口号"
+            )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.form_submit_button("💾 保存配置", type="primary"):
+                result = set_udp_notification_config(notification_host, notification_port)
+                if result.get("success"):
+                    st.success("UDP通知配置已保存")
+                    st.rerun()
+                else:
+                    st.error(f"保存失败: {result.get('error', '未知错误')}")
+        
+        with col2:
+            if st.form_submit_button("🧪 测试通知"):
+                with st.spinner("正在发送测试通知..."):
+                    result = test_udp_notification("-blue")
+                    if result.get("success"):
+                        st.success(f"测试通知发送成功！\n消息: {result.get('sent_message')}")
+                    else:
+                        st.error(f"测试失败: {result.get('error', '未知错误')}")
+        
+        with col3:
+            if st.form_submit_button("🔄 刷新配置"):
+                st.rerun()
+    
+    # 显示当前配置状态
+    st.write("**当前UDP通知配置:**")
+    st.write(f"- 目标地址: `{current_host}:{current_port}`")
+    st.write(f"- 通知消息: `-blue`")
+    st.write(f"- 触发条件: 检测到越网行为 (binary_signal = '1')")
+    
+    st.markdown("---")
+    
     # API设置
     st.subheader("🔗 API设置")
     st.write(f"**后端API地址:** {API_BASE_URL}")
@@ -755,7 +852,7 @@ with tab4:
     st.subheader("ℹ️ 系统信息")
     st.write("**版本:** 1.0.0")
     st.write("**功能:** 网球场理论沟通分析")
-    st.write("**支持:** 文本分析、实时语音识别、历史记录")
+    st.write("**支持:** 文本分析、实时语音识别、历史记录、UDP通知")
 
 # 自动刷新逻辑
 if auto_refresh and st.session_state.vad_running:
