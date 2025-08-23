@@ -10,10 +10,14 @@ import json
 import logging
 import threading
 import queue
+from dotenv import load_dotenv
 from dashscope.audio.qwen_omni import *
 import dashscope
 from dashscope import Generation
 from http import HTTPStatus
+
+# Load environment variables from .env file
+load_dotenv()
 
 # 如果没有设置环境变量，请用您的 API Key 将下行替换为dashscope.api_key = "sk-xxx"
 dashscope.api_key = os.getenv('DASHSCOPE_API_KEY')
