@@ -137,6 +137,28 @@ def get_vad_status():
     except Exception as e:
         return {"success": False, "vad_running": False}
 
+def get_udp_data():
+    """获取UDP数据"""
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/udp/data", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": "No UDP data available"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_udp_status():
+    """获取UDP服务器状态"""
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/udp/status", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "udp_running": False}
+    except Exception as e:
+        return {"success": False, "udp_running": False}
+
 def display_analysis_result(result):
     """显示分析结果"""
     if not result or not result.get("success"):
@@ -244,7 +266,7 @@ with st.sidebar:
         refresh_interval = st.slider("刷新间隔(秒)", 1, 10, 3)
 
 # 主内容区域
-tab1, tab2, tab3, tab4 = st.tabs(["📝 文本分析", "🎤 实时语音", "📊 分析历史", "⚙️ 设置"])
+tab1, tab2, tab3, tab4 = st.tabs(["📝 文本分析", "� 实时语音", "语📡 UDP数据", "⚙, "📡 UDP数据", "⚙️ 设置"])
 
 with tab1:
     st.header("📝 文本分析")
@@ -386,6 +408,140 @@ with tab3:
         st.info("暂无分析历史记录")
 
 with tab4:
+    st.header("📡 UDP数据监控")
+    
+    # UDP服务器状态
+    udp_status_data = get_udp_status()
+    udp_running = udp_status_data.get("udp_running", False)
+    
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if udp_running:
+            st.success("🟢 UDP服务器运行中")
+        else:
+            st.error("🔴 UDP服务器未运行")
+    
+    with col2:
+        if st.button("🔄 刷新UDP数据"):
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # 获取UDP数据
+    udp_data = get_udp_data()
+    
+    if udp_data.get("success") and udp_data.get("data"):
+        data_list = udp_data["data"]
+        
+        # 显示统计信息
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("总接收数据包", len(data_list))
+        with col2:
+            # 计算最近1分钟的数据包数量
+            recent_count = 0
+            current_time = datetime.now()
+            for item in data_list:
+                try:
+                    item_time = datetime.fromisoformat(item.get("timestamp", ""))
+                    if (current_time - item_time).total_seconds() <= 60:
+                        recent_count += 1
+                except:
+                    pass
+            st.metric("最近1分钟", recent_count)
+        with col3:
+            # 显示最新数据包时间
+            if data_list:
+                latest_time = data_list[-1].get("timestamp", "N/A")[:19]
+                st.metric("最新数据", latest_time)
+            else:
+                st.metric("最新数据", "无")
+        with col4:
+            # 显示数据包大小统计
+            if data_list:
+                avg_size = sum(len(str(item.get("data", ""))) for item in data_list) / len(data_list)
+                st.metric("平均包大小", f"{avg_size:.0f}字节")
+            else:
+                st.metric("平均包大小", "0字节")
+        
+        st.markdown("---")
+        
+        # 实时数据显示
+        st.subheader("📊 实时UDP数据流")
+        
+        # 创建数据表格
+        if data_list:
+            # 只显示最近50条数据
+            recent_data = data_list[-50:] if len(data_list) > 50 else data_list
+            
+            # 准备表格数据
+            table_data = []
+            for i, item in enumerate(reversed(recent_data)):
+                table_data.append({
+                    "序号": len(recent_data) - i,
+                    "时间": item.get("timestamp", "N/A")[:19],
+                    "源地址": item.get("source_ip", "N/A"),
+                    "源端口": item.get("source_port", "N/A"),
+                    "数据长度": len(str(item.get("data", ""))),
+                    "数据预览": str(item.get("data", ""))[:50] + "..." if len(str(item.get("data", ""))) > 50 else str(item.get("data", ""))
+                })
+            
+            # 显示表格
+            df = pd.DataFrame(table_data)
+            st.dataframe(df, use_container_width=True, height=400)
+            
+            st.markdown("---")
+            
+            # 详细数据展开
+            st.subheader("🔍 详细数据查看")
+            
+            # 选择要查看的数据包
+            selected_index = st.selectbox(
+                "选择要查看的数据包:",
+                options=range(len(recent_data)),
+                format_func=lambda x: f"数据包 #{len(recent_data) - x} - {recent_data[len(recent_data) - 1 - x].get('timestamp', 'N/A')[:19]}"
+            )
+            
+            if selected_index is not None:
+                selected_item = recent_data[len(recent_data) - 1 - selected_index]
+                
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.write("**基本信息:**")
+                    st.write(f"时间戳: {selected_item.get('timestamp', 'N/A')}")
+                    st.write(f"源IP: {selected_item.get('source_ip', 'N/A')}")
+                    st.write(f"源端口: {selected_item.get('source_port', 'N/A')}")
+                    st.write(f"数据长度: {len(str(selected_item.get('data', '')))} 字节")
+                
+                with col2:
+                    st.write("**完整数据内容:**")
+                    data_content = selected_item.get("data", "")
+                    
+                    # 尝试解析JSON
+                    try:
+                        if isinstance(data_content, str):
+                            json_data = json.loads(data_content)
+                            st.json(json_data)
+                        else:
+                            st.json(data_content)
+                    except:
+                        # 如果不是JSON，显示为文本
+                        st.code(str(data_content), language="text")
+        
+        # 清空UDP数据按钮
+        if st.button("🗑️ 清空UDP数据历史"):
+            # 这里需要后端API支持清空UDP数据
+            st.warning("清空功能需要后端API支持")
+            
+    else:
+        st.info("暂无UDP数据或UDP服务器未运行")
+        st.write("请确保:")
+        st.write("- UDP服务器已启动")
+        st.write("- 有客户端正在发送数据")
+        st.write("- 后端API正常运行")
+
+with tab5:
     st.header("⚙️ 系统设置")
     
     # 提示词设置

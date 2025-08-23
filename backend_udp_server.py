@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class UDPAnalysisServer:
-    def __init__(self, host='localhost', port=5002):
+    def __init__(self, host='0.0.0.0', port=5002):
         self.host = host
         self.port = port
         self.socket = None
@@ -77,10 +77,28 @@ class UDPAnalysisServer:
             # Base64编码音频数据
             audio_b64 = base64.b64encode(audio_data).decode('ascii')
             
+            # 检查连接状态并重连
+            if not self.conversation or not hasattr(self.conversation, '_ws') or self.conversation._ws is None:
+                logger.info("Audio connection lost, attempting to reconnect...")
+                self.start_audio_session()
+            
             # 发送到语音识别服务
             if self.conversation:
-                self.conversation.append_audio(audio_b64)
-                logger.debug(f"Sent {len(audio_data)} bytes of audio data")
+                try:
+                    self.conversation.append_audio(audio_b64)
+                    logger.debug(f"Sent {len(audio_data)} bytes of audio data")
+                except Exception as conn_error:
+                    if "closed" in str(conn_error).lower():
+                        logger.warning("Connection closed, attempting to reconnect...")
+                        self.start_audio_session()
+                        # 重试一次
+                        try:
+                            self.conversation.append_audio(audio_b64)
+                            logger.debug(f"Reconnected and sent {len(audio_data)} bytes of audio data")
+                        except Exception as retry_error:
+                            logger.error(f"Retry failed: {retry_error}")
+                    else:
+                        raise conn_error
             else:
                 logger.error("Conversation not initialized")
                 
@@ -389,7 +407,7 @@ class UDPOmniCallback(OmniRealtimeCallback):
 def main():
     """主函数"""
     # 从环境变量获取配置
-    host = os.getenv('UDP_HOST', 'localhost')
+    host = os.getenv('UDP_HOST', '0.0.0.0')
     port = int(os.getenv('UDP_PORT', 5002))
     
     server = UDPAnalysisServer(host, port)

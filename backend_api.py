@@ -41,6 +41,10 @@ latest_analysis = {
 # 全局变量存储所有分析历史
 analysis_history = []
 
+# UDP数据存储
+udp_data_history = []
+udp_server_running = False
+
 # VAD 全局变量
 vad_conversation = None
 vad_running = False
@@ -620,6 +624,91 @@ def vad_status():
         "vad_running": vad_service.running,
         "has_data": latest_analysis["timestamp"] is not None,
         "latest_analysis": latest_analysis if latest_analysis["timestamp"] else None
+    })
+
+@app.route('/api/udp/status', methods=['GET'])
+def udp_status():
+    """获取UDP服务器状态"""
+    global udp_server_running
+    
+    # 检查UDP服务器是否在运行（通过检查端口5002）
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1)
+        # 尝试绑定到UDP端口，如果失败说明端口被占用（服务器在运行）
+        sock.bind(('localhost', 5002))
+        sock.close()
+        udp_server_running = False
+    except socket.error:
+        # 端口被占用，说明UDP服务器在运行
+        udp_server_running = True
+    
+    return jsonify({
+        "success": True,
+        "udp_running": udp_server_running,
+        "port": 5002,
+        "host": "0.0.0.0"
+    })
+
+@app.route('/api/udp/data', methods=['GET'])
+def get_udp_data():
+    """获取UDP数据历史"""
+    global udp_data_history
+    
+    # 从日志文件读取UDP数据（如果有的话）
+    try:
+        # 尝试从output.log读取UDP相关的数据
+        udp_entries = []
+        if os.path.exists("output.log"):
+            with open("output.log", "r", encoding='utf-8') as f:
+                content = f.read()
+                lines = content.split('\n')
+                
+                current_entry = {}
+                for line in lines:
+                    if 'UDP question:' in line:
+                        if current_entry:
+                            udp_entries.append(current_entry)
+                        current_entry = {
+                            "timestamp": datetime.now().isoformat(),
+                            "source_ip": "127.0.0.1",
+                            "source_port": 5002,
+                            "data": line.split('UDP question:', 1)[1].strip()
+                        }
+                    elif 'UDP LLM Response:' in line and current_entry:
+                        current_entry["llm_response"] = line.split('UDP LLM Response:', 1)[1].strip()
+                    elif '======UDP RESPONSE DONE======' in line and current_entry:
+                        udp_entries.append(current_entry)
+                        current_entry = {}
+        
+        # 如果没有从日志读取到数据，返回模拟数据用于测试
+        if not udp_entries:
+            udp_entries = udp_data_history
+        
+        return jsonify({
+            "success": True,
+            "data": udp_entries,
+            "count": len(udp_entries)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error reading UDP data: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "data": []
+        })
+
+@app.route('/api/udp/data', methods=['DELETE'])
+def clear_udp_data():
+    """清空UDP数据历史"""
+    global udp_data_history
+    udp_data_history.clear()
+    
+    return jsonify({
+        "success": True,
+        "message": "UDP data history cleared"
     })
 
 if __name__ == '__main__':
