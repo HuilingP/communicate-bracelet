@@ -2,6 +2,9 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import json
+import socket
+import signal
+import sys
 from dotenv import load_dotenv
 from dashscope import Generation
 import dashscope
@@ -404,6 +407,314 @@ class VADCallback(OmniRealtimeCallback):
         except Exception as e:
             logger.error(f'[VAD Error] {e}')
 
+class UDPOmniCallback(OmniRealtimeCallback):
+    def __init__(self, server):
+        self.server = server
+    
+    def on_open(self) -> None:
+        logger.info('UDP Audio connection opened')
+    
+    def on_close(self, close_status_code, close_msg) -> None:
+        logger.info(f'UDP Audio connection closed with code: {close_status_code}, msg: {close_msg}')
+    
+    def on_event(self, response: str) -> None:
+        try:
+            type = response['type']
+            if 'session.created' == type:
+                logger.info(f'UDP Audio session started: {response["session"]["id"]}')
+            
+            if 'conversation.item.input_audio_transcription.completed' == type:
+                transcript = response['transcript']
+                logger.info(f'UDP Audio transcription: {transcript}')
+                
+                # 使用LLM服务分析转录文本
+                analysis_result = llm_service.analyze_text(transcript)
+                
+                if analysis_result.get('success'):
+                    binary_signal = analysis_result.get('binary_signal', '0')
+                    logger.info(f'UDP Analysis result: {binary_signal}')
+                    
+                    # 记录UDP特定的日志
+                    with open("output.log", "a", encoding='utf-8') as f:
+                        f.write(f"UDP question: {transcript}\n")
+                        f.write(f"UDP LLM Response: {analysis_result.get('llm_response', '')}\n")
+                        f.write(f"{binary_signal}======UDP RESPONSE DONE======\n")
+                else:
+                    logger.error(f'UDP Analysis failed: {analysis_result.get("error")}')
+            
+            if 'response.done' == type:
+                logger.info('UDP Audio response completed')
+                
+        except Exception as e:
+            logger.error(f'Error in UDP audio callback: {e}')
+
+class UDPAnalysisServer:
+    def __init__(self, host='0.0.0.0', port=5002):
+        self.host = host
+        self.port = port
+        self.socket = None
+        self.running = False
+        self.audio_buffer = b''
+        self.buffer_size = 3200
+        self.conversation = None
+        self.callback = None
+        self.active_threads = []
+        self.server_thread = None
+        
+        # 初始化音频处理
+        self.init_audio_processing()
+    
+    def init_audio_processing(self):
+        """初始化音频处理组件"""
+        try:
+            self.callback = UDPOmniCallback(self)
+            self.conversation = OmniRealtimeConversation(
+                model='qwen-omni-turbo-realtime-latest',
+                callback=self.callback,
+            )
+            logger.info("UDP Audio processing initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize UDP audio processing: {e}")
+    
+    def start_audio_session(self):
+        """启动音频会话"""
+        try:
+            if self.conversation:
+                self.conversation.connect()
+                self.conversation.update_session(
+                    output_modalities=[MultiModality.TEXT],
+                    voice='Chelsie',
+                    input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                    output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                    enable_input_audio_transcription=True,
+                    input_audio_transcription_model='gummy-realtime-v1',
+                    enable_turn_detection=True,
+                    turn_detection_type='server_vad',
+                )
+                logger.info("UDP Audio session started")
+        except Exception as e:
+            logger.error(f"Failed to start UDP audio session: {e}")
+    
+    def process_audio_chunk(self, audio_data):
+        """处理音频数据块"""
+        try:
+            # Base64编码音频数据
+            audio_b64 = base64.b64encode(audio_data).decode('ascii')
+            
+            # 发送到语音识别服务
+            if self.conversation:
+                try:
+                    self.conversation.append_audio(audio_b64)
+                    logger.debug(f"UDP sent {len(audio_data)} bytes of audio data")
+                except Exception as conn_error:
+                    if "closed" in str(conn_error).lower():
+                        logger.warning("UDP connection closed, attempting to reconnect...")
+                        self.start_audio_session()
+                        try:
+                            self.conversation.append_audio(audio_b64)
+                            logger.debug(f"UDP reconnected and sent {len(audio_data)} bytes of audio data")
+                        except Exception as retry_error:
+                            logger.error(f"UDP retry failed: {retry_error}")
+                    else:
+                        raise conn_error
+            else:
+                logger.error("UDP conversation not initialized")
+                
+        except Exception as e:
+            logger.error(f"Error processing UDP audio chunk: {e}")
+    
+    def start_server(self):
+        """启动UDP服务器"""
+        if self.running:
+            return {"success": False, "message": "UDP server already running"}
+            
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.bind((self.host, self.port))
+            self.socket.settimeout(1.0)
+            self.running = True
+            
+            # 启动音频会话
+            self.start_audio_session()
+            
+            # 在单独线程中运行服务器
+            self.server_thread = threading.Thread(target=self._server_loop, daemon=True)
+            self.server_thread.start()
+            
+            global udp_server_running
+            udp_server_running = True
+            
+            logger.info(f"UDP Analysis Server started on {self.host}:{self.port}")
+            return {"success": True, "message": f"UDP server started on {self.host}:{self.port}"}
+            
+        except Exception as e:
+            logger.error(f"Failed to start UDP server: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _server_loop(self):
+        """UDP服务器主循环"""
+        while self.running:
+            try:
+                data, addr = self.socket.recvfrom(4096)
+                
+                # 在新线程中处理请求
+                thread = threading.Thread(
+                    target=self.handle_request,
+                    args=(data, addr),
+                    daemon=True
+                )
+                self.active_threads.append(thread)
+                thread.start()
+                
+                # 清理已完成的线程
+                self.active_threads = [t for t in self.active_threads if t.is_alive()]
+                
+            except socket.timeout:
+                continue
+            except socket.error as e:
+                if self.running:
+                    logger.error(f"UDP socket error: {e}")
+                break
+            except Exception as e:
+                logger.error(f"UDP unexpected error: {e}")
+    
+    def handle_request(self, data, addr):
+        """处理UDP请求 - 支持音频字节和文本"""
+        try:
+            # 记录UDP数据到全局存储
+            global udp_data_history
+            udp_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "source_ip": addr[0],
+                "source_port": addr[1],
+                "data_length": len(data),
+                "data": None
+            }
+            
+            # 尝试判断是音频数据还是文本数据
+            try:
+                message = data.decode('utf-8')
+                if message.startswith('{') or len(message) < 100:
+                    udp_entry["data"] = message
+                    udp_entry["type"] = "text"
+                    udp_data_history.append(udp_entry)
+                    self.handle_text_request(message, addr)
+                    return
+            except UnicodeDecodeError:
+                pass
+            
+            # 处理音频数据
+            udp_entry["data"] = f"<binary audio data: {len(data)} bytes>"
+            udp_entry["type"] = "audio"
+            udp_data_history.append(udp_entry)
+            self.handle_audio_request(data, addr)
+            
+        except Exception as e:
+            logger.error(f"Error handling UDP request from {addr}: {e}")
+    
+    def handle_text_request(self, message, addr):
+        """处理文本请求"""
+        try:
+            logger.info(f"Received UDP text from {addr}: {message[:100]}...")
+            
+            try:
+                request_data = json.loads(message)
+            except json.JSONDecodeError:
+                request_data = {"text": message}
+            
+            text = request_data.get('text', '').strip()
+            
+            if not text:
+                response = {"success": False, "error": "Text input is required"}
+            else:
+                response = llm_service.analyze_text(text)
+            
+            response_json = json.dumps(response, ensure_ascii=False)
+            self.socket.sendto(response_json.encode('utf-8'), addr)
+            
+            logger.info(f"UDP text response sent to {addr}: {response.get('binary_signal', 'error')}")
+            
+        except Exception as e:
+            logger.error(f"Error handling UDP text request from {addr}: {e}")
+            self.send_error_response(addr, str(e))
+    
+    def handle_audio_request(self, audio_data, addr):
+        """处理音频请求"""
+        try:
+            logger.info(f"Received UDP {len(audio_data)} bytes of audio from {addr}")
+            
+            # 将音频数据添加到缓冲区
+            self.audio_buffer += audio_data
+            
+            # 当缓冲区达到3200字节时处理
+            while len(self.audio_buffer) >= self.buffer_size:
+                chunk = self.audio_buffer[:self.buffer_size]
+                self.audio_buffer = self.audio_buffer[self.buffer_size:]
+                self.process_audio_chunk(chunk)
+            
+            # 发送确认响应
+            response = {
+                "success": True,
+                "message": f"Received {len(audio_data)} bytes of audio",
+                "buffer_size": len(self.audio_buffer)
+            }
+            response_json = json.dumps(response)
+            self.socket.sendto(response_json.encode('utf-8'), addr)
+            
+        except Exception as e:
+            logger.error(f"Error handling UDP audio request from {addr}: {e}")
+            self.send_error_response(addr, str(e))
+    
+    def send_error_response(self, addr, error_msg):
+        """发送错误响应"""
+        try:
+            error_response = {"success": False, "error": error_msg}
+            error_json = json.dumps(error_response)
+            self.socket.sendto(error_json.encode('utf-8'), addr)
+        except:
+            pass
+    
+    def stop_server(self):
+        """停止UDP服务器"""
+        logger.info("Stopping UDP Analysis Server...")
+        self.running = False
+        
+        global udp_server_running
+        udp_server_running = False
+        
+        # 关闭音频会话
+        if self.conversation:
+            try:
+                self.conversation.close()
+                logger.info("UDP Audio conversation closed")
+            except Exception as e:
+                logger.error(f"Error closing UDP conversation: {e}")
+        
+        # 关闭socket
+        if self.socket:
+            try:
+                self.socket.close()
+                self.socket = None
+                logger.info("UDP Socket closed")
+            except Exception as e:
+                logger.error(f"Error closing UDP socket: {e}")
+        
+        # 等待服务器线程完成
+        if self.server_thread:
+            self.server_thread.join(timeout=2)
+        
+        # 等待活跃线程完成
+        if self.active_threads:
+            logger.info(f"Waiting for {len(self.active_threads)} UDP threads to finish...")
+            start_time = time.time()
+            while self.active_threads and (time.time() - start_time) < 2.0:
+                self.active_threads = [t for t in self.active_threads if t.is_alive()]
+                if self.active_threads:
+                    time.sleep(0.1)
+        
+        logger.info("UDP Analysis Server stopped")
+        return {"success": True, "message": "UDP server stopped"}
+
 class VADService:
     def __init__(self):
         self.callback = VADCallback()
@@ -492,6 +803,7 @@ class VADService:
 llm_service = LLMService()
 log_monitor = LogMonitorService()
 vad_service = VADService()
+udp_server = UDPAnalysisServer()
 
 @app.route('/', methods=['GET'])
 def root():
@@ -503,9 +815,14 @@ def root():
             "health": "/api/health",
             "analyze": "/api/analyze",
             "latest_analysis": "/api/analysis/latest",
+            "analysis_history": "/api/analysis/history",
             "start_vad": "/api/vad/start",
             "stop_vad": "/api/vad/stop",
-            "vad_status": "/api/vad/status"
+            "vad_status": "/api/vad/status",
+            "start_udp": "/api/udp/start",
+            "stop_udp": "/api/udp/stop",
+            "udp_status": "/api/udp/status",
+            "udp_data": "/api/udp/data"
         }
     })
 
@@ -626,29 +943,48 @@ def vad_status():
         "latest_analysis": latest_analysis if latest_analysis["timestamp"] else None
     })
 
+@app.route('/api/udp/start', methods=['POST'])
+def start_udp_server():
+    """启动UDP服务器"""
+    try:
+        result = udp_server.start_server()
+        if result["success"]:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"Failed to start UDP server: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/udp/stop', methods=['POST'])
+def stop_udp_server():
+    """停止UDP服务器"""
+    try:
+        result = udp_server.stop_server()
+        if result["success"]:
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
+    except Exception as e:
+        logger.error(f"Failed to stop UDP server: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 @app.route('/api/udp/status', methods=['GET'])
 def udp_status():
     """获取UDP服务器状态"""
-    global udp_server_running
-    
-    # 检查UDP服务器是否在运行（通过检查端口5002）
-    import socket
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(1)
-        # 尝试绑定到UDP端口，如果失败说明端口被占用（服务器在运行）
-        sock.bind(('localhost', 5002))
-        sock.close()
-        udp_server_running = False
-    except socket.error:
-        # 端口被占用，说明UDP服务器在运行
-        udp_server_running = True
-    
     return jsonify({
         "success": True,
-        "udp_running": udp_server_running,
-        "port": 5002,
-        "host": "0.0.0.0"
+        "udp_running": udp_server.running,
+        "port": udp_server.port,
+        "host": udp_server.host,
+        "has_data": len(udp_data_history) > 0,
+        "data_count": len(udp_data_history)
     })
 
 @app.route('/api/udp/data', methods=['GET'])

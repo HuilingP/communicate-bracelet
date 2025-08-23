@@ -159,6 +159,22 @@ def get_udp_status():
     except Exception as e:
         return {"success": False, "udp_running": False}
 
+def start_udp_server():
+    """启动UDP服务器"""
+    try:
+        response = requests.post(f"{API_BASE_URL}/api/udp/start", timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def stop_udp_server():
+    """停止UDP服务器"""
+    try:
+        response = requests.post(f"{API_BASE_URL}/api/udp/stop", timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 def display_analysis_result(result):
     """显示分析结果"""
     if not result or not result.get("success"):
@@ -253,6 +269,35 @@ with st.sidebar:
                 if result.get("success"):
                     st.success("VAD服务已启动")
                     st.session_state.vad_running = True
+                    st.rerun()
+                else:
+                    st.error(f"启动失败: {result.get('error', '未知错误')}")
+    
+    st.markdown("---")
+    
+    # UDP服务器控制
+    st.subheader("📡 UDP服务器控制")
+    
+    # 获取UDP状态
+    udp_status_data = get_udp_status()
+    current_udp_running = udp_status_data.get("udp_running", False)
+    
+    if current_udp_running:
+        st.success("🟢 UDP服务器运行中")
+        if st.button("⏹️ 停止UDP服务器"):
+            result = stop_udp_server()
+            if result.get("success"):
+                st.success("UDP服务器已停止")
+                st.rerun()
+            else:
+                st.error(f"停止失败: {result.get('error', '未知错误')}")
+    else:
+        st.info("🔴 UDP服务器未运行")
+        if st.button("▶️ 启动UDP服务器"):
+            with st.spinner("正在启动UDP服务器..."):
+                result = start_udp_server()
+                if result.get("success"):
+                    st.success("UDP服务器已启动")
                     st.rerun()
                 else:
                     st.error(f"启动失败: {result.get('error', '未知错误')}")

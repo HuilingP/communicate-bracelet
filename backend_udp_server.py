@@ -5,6 +5,8 @@ import logging
 import os
 import base64
 import time
+import signal
+import sys
 from dotenv import load_dotenv
 from dashscope import Generation
 import dashscope
@@ -33,6 +35,7 @@ class UDPAnalysisServer:
         self.buffer_size = 3200  # 每次处理3200字节
         self.conversation = None
         self.callback = None
+        self.active_threads = []  # 跟踪活跃线程
         
         if not self.api_key:
             logger.error("DashScope API Key not found in environment variables")
@@ -247,7 +250,11 @@ class UDPAnalysisServer:
                         args=(data, addr),
                         daemon=True
                     )
+                    self.active_threads.append(thread)
                     thread.start()
+                    
+                    # 清理已完成的线程
+                    self.active_threads = [t for t in self.active_threads if t.is_alive()]
                     
                 except socket.timeout:
                     # 超时是正常的，继续循环检查 self.running
@@ -363,15 +370,38 @@ class UDPAnalysisServer:
     
     def stop_server(self):
         """停止UDP服务器"""
+        logger.info("Stopping UDP Analysis Server...")
         self.running = False
+        
+        # 关闭音频会话
         if self.conversation:
             try:
                 self.conversation.close()
-            except:
-                pass
+                logger.info("Audio conversation closed")
+            except Exception as e:
+                logger.error(f"Error closing conversation: {e}")
+        
+        # 关闭socket
         if self.socket:
-            self.socket.close()
-            self.socket = None
+            try:
+                self.socket.close()
+                self.socket = None
+                logger.info("Socket closed")
+            except Exception as e:
+                logger.error(f"Error closing socket: {e}")
+        
+        # 等待活跃线程完成（最多等待2秒）
+        if self.active_threads:
+            logger.info(f"Waiting for {len(self.active_threads)} active threads to finish...")
+            start_time = time.time()
+            while self.active_threads and (time.time() - start_time) < 2.0:
+                self.active_threads = [t for t in self.active_threads if t.is_alive()]
+                if self.active_threads:
+                    time.sleep(0.1)
+            
+            if self.active_threads:
+                logger.warning(f"{len(self.active_threads)} threads still active after timeout")
+        
         logger.info("UDP Analysis Server stopped")
 
 class UDPOmniCallback(OmniRealtimeCallback):
@@ -409,8 +439,18 @@ class UDPOmniCallback(OmniRealtimeCallback):
         except Exception as e:
             logger.error(f'Error in audio callback: {e}')
 
+def signal_handler(signum, frame):
+    """信号处理器 - 强制退出"""
+    logger.info(f"Received signal {signum}, forcing exit...")
+    # 强制退出，不等待清理
+    os._exit(0)
+
 def main():
     """主函数"""
+    # 设置信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # 从环境变量获取配置
     host = os.getenv('UDP_HOST', '0.0.0.0')
     port = int(os.getenv('UDP_PORT', 5002))
@@ -421,8 +461,16 @@ def main():
         server.start_server()
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
     finally:
-        server.stop_server()
+        try:
+            server.stop_server()
+        except:
+            pass
+        # 如果正常关闭失败，强制退出
+        logger.info("Forcing exit...")
+        os._exit(0)
 
 if __name__ == '__main__':
     main()
