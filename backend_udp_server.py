@@ -3,11 +3,14 @@ import json
 import threading
 import logging
 import os
+import base64
+import time
 from dotenv import load_dotenv
 from dashscope import Generation
 import dashscope
 from http import HTTPStatus
 from datetime import datetime
+from dashscope.audio.qwen_omni import *
 
 # 加载环境变量
 load_dotenv()
@@ -26,10 +29,64 @@ class UDPAnalysisServer:
         self.socket = None
         self.running = False
         self.api_key = os.getenv("DASHSCOPE_API_KEY")
+        self.audio_buffer = b''  # 音频缓冲区
+        self.buffer_size = 3200  # 每次处理3200字节
+        self.conversation = None
+        self.callback = None
         
         if not self.api_key:
             logger.error("DashScope API Key not found in environment variables")
+        
+        # 初始化音频处理
+        self.init_audio_processing()
     
+    def init_audio_processing(self):
+        """初始化音频处理组件"""
+        try:
+            self.callback = UDPOmniCallback(self)
+            self.conversation = OmniRealtimeConversation(
+                model='qwen-omni-turbo-realtime-latest',
+                callback=self.callback,
+            )
+            logger.info("Audio processing initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize audio processing: {e}")
+    
+    def start_audio_session(self):
+        """启动音频会话"""
+        try:
+            if self.conversation:
+                self.conversation.connect()
+                self.conversation.update_session(
+                    output_modalities=[MultiModality.TEXT],
+                    voice='Chelsie',
+                    input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                    output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                    enable_input_audio_transcription=True,
+                    input_audio_transcription_model='gummy-realtime-v1',
+                    enable_turn_detection=True,
+                    turn_detection_type='server_vad',
+                )
+                logger.info("Audio session started")
+        except Exception as e:
+            logger.error(f"Failed to start audio session: {e}")
+    
+    def process_audio_chunk(self, audio_data):
+        """处理音频数据块"""
+        try:
+            # Base64编码音频数据
+            audio_b64 = base64.b64encode(audio_data).decode('ascii')
+            
+            # 发送到语音识别服务
+            if self.conversation:
+                self.conversation.append_audio(audio_b64)
+                logger.debug(f"Sent {len(audio_data)} bytes of audio data")
+            else:
+                logger.error("Conversation not initialized")
+                
+        except Exception as e:
+            logger.error(f"Error processing audio chunk: {e}")
+
     def analyze_text(self, text):
         """使用网球场理论分析文本 - 与backend_api.py相同的逻辑"""
         if not self.api_key:
@@ -154,6 +211,9 @@ class UDPAnalysisServer:
             self.socket.bind((self.host, self.port))
             self.running = True
             
+            # 启动音频会话
+            self.start_audio_session()
+            
             logger.info(f"UDP Analysis Server started on {self.host}:{self.port}")
             
             while self.running:
@@ -182,11 +242,30 @@ class UDPAnalysisServer:
             self.stop_server()
     
     def handle_request(self, data, addr):
-        """处理UDP请求"""
+        """处理UDP请求 - 支持音频字节和文本"""
         try:
-            # 解码接收到的数据
-            message = data.decode('utf-8')
-            logger.info(f"Received from {addr}: {message}")
+            # 尝试判断是音频数据还是文本数据
+            try:
+                # 尝试解码为UTF-8文本
+                message = data.decode('utf-8')
+                # 如果成功解码且看起来像JSON或文本，按文本处理
+                if message.startswith('{') or len(message) < 100:
+                    self.handle_text_request(message, addr)
+                    return
+            except UnicodeDecodeError:
+                # 解码失败，说明是二进制音频数据
+                pass
+            
+            # 处理音频数据
+            self.handle_audio_request(data, addr)
+            
+        except Exception as e:
+            logger.error(f"Error handling request from {addr}: {e}")
+    
+    def handle_text_request(self, message, addr):
+        """处理文本请求"""
+        try:
+            logger.info(f"Received text from {addr}: {message[:100]}...")
             
             # 解析JSON请求
             try:
@@ -211,27 +290,101 @@ class UDPAnalysisServer:
             response_json = json.dumps(response, ensure_ascii=False)
             self.socket.sendto(response_json.encode('utf-8'), addr)
             
-            logger.info(f"Response sent to {addr}: {response.get('binary_signal', 'error')}")
+            logger.info(f"Text response sent to {addr}: {response.get('binary_signal', 'error')}")
             
         except Exception as e:
-            logger.error(f"Error handling request from {addr}: {e}")
+            logger.error(f"Error handling text request from {addr}: {e}")
+            self.send_error_response(addr, str(e))
+    
+    def handle_audio_request(self, audio_data, addr):
+        """处理音频请求"""
+        try:
+            logger.info(f"Received {len(audio_data)} bytes of audio from {addr}")
+            
+            # 将音频数据添加到缓冲区
+            self.audio_buffer += audio_data
+            
+            # 当缓冲区达到3200字节时处理
+            while len(self.audio_buffer) >= self.buffer_size:
+                # 取出3200字节
+                chunk = self.audio_buffer[:self.buffer_size]
+                self.audio_buffer = self.audio_buffer[self.buffer_size:]
+                
+                # 处理音频块
+                self.process_audio_chunk(chunk)
+            
+            # 发送确认响应
+            response = {
+                "success": True,
+                "message": f"Received {len(audio_data)} bytes of audio",
+                "buffer_size": len(self.audio_buffer)
+            }
+            response_json = json.dumps(response)
+            self.socket.sendto(response_json.encode('utf-8'), addr)
+            
+        except Exception as e:
+            logger.error(f"Error handling audio request from {addr}: {e}")
+            self.send_error_response(addr, str(e))
+    
+    def send_error_response(self, addr, error_msg):
+        """发送错误响应"""
+        try:
             error_response = {
                 "success": False,
-                "error": str(e)
+                "error": error_msg
             }
-            try:
-                error_json = json.dumps(error_response)
-                self.socket.sendto(error_json.encode('utf-8'), addr)
-            except:
-                pass
+            error_json = json.dumps(error_response)
+            self.socket.sendto(error_json.encode('utf-8'), addr)
+        except:
+            pass
     
     def stop_server(self):
         """停止UDP服务器"""
         self.running = False
+        if self.conversation:
+            try:
+                self.conversation.close()
+            except:
+                pass
         if self.socket:
             self.socket.close()
             self.socket = None
         logger.info("UDP Analysis Server stopped")
+
+class UDPOmniCallback(OmniRealtimeCallback):
+    def __init__(self, server):
+        self.server = server
+    
+    def on_open(self) -> None:
+        logger.info('Audio connection opened')
+    
+    def on_close(self, close_status_code, close_msg) -> None:
+        logger.info(f'Audio connection closed with code: {close_status_code}, msg: {close_msg}')
+    
+    def on_event(self, response: str) -> None:
+        try:
+            type = response['type']
+            if 'session.created' == type:
+                logger.info(f'Audio session started: {response["session"]["id"]}')
+            
+            if 'conversation.item.input_audio_transcription.completed' == type:
+                transcript = response['transcript']
+                logger.info(f'Audio transcription: {transcript}')
+                
+                # 使用服务器的分析函数
+                analysis_result = self.server.analyze_text(transcript)
+                
+                if analysis_result.get('success'):
+                    binary_signal = analysis_result.get('binary_signal', '0')
+                    logger.info(f'Analysis result: {binary_signal}')
+                else:
+                    logger.error(f'Analysis failed: {analysis_result.get("error")}')
+            
+            if 'response.done' == type:
+                logger.info('Audio response completed')
+                
+        except Exception as e:
+            logger.error(f'Error in audio callback: {e}')
 
 def main():
     """主函数"""
