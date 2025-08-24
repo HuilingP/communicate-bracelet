@@ -872,7 +872,15 @@ def analyze_text():
         if result["success"]:
             # 如果检测到违规（binary_signal为"1"），发送UDP消息
             if result.get("binary_signal") == "1":
-                send_udp_notification("-blue")
+                send_udp_notification("-led -all -clear")
+                print("发送UDP通知: 清除所有LED")
+                send_udp_notification("-led -red -start")
+                print("发送UDP通知: 启动红色LED (检测到违规)")
+            elif result.get("binary_signal") == "0":
+                send_udp_notification("-led -all -clear")
+                print("发送UDP通知: 清除所有LED")
+                send_udp_notification("-led -green -start")
+                print("发送UDP通知: 启动绿色LED (未检测到违规)")
             
             return jsonify(result)
         else:
