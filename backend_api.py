@@ -459,7 +459,7 @@ class UDPAnalysisServer:
         self.socket = None
         self.running = False
         self.audio_buffer = b''
-        self.buffer_size = 3200
+        self.buffer_size = 32000
         self.conversation = None
         self.callback = None
         self.active_threads = []
@@ -872,7 +872,7 @@ def analyze_text():
             return jsonify({"success": False, "error": "Text input is required"}), 400
         
         result = llm_service.analyze_text(user_input)
-        
+        print(f"输入: {user_input} ")
         if result["success"]:
             # 如果检测到违规（binary_signal为"1"），发送UDP消息
             if result.get("binary_signal") == "1":
