@@ -656,15 +656,6 @@ class UDPAnalysisServer:
                 self.audio_buffer = self.audio_buffer[self.buffer_size:]
                 self.process_audio_chunk(chunk)
             
-            # 发送确认响应
-            response = {
-                "success": True,
-                "message": f"Received {len(audio_data)} bytes of audio",
-                "buffer_size": len(self.audio_buffer)
-            }
-            response_json = json.dumps(response)
-            self.socket.sendto(response_json.encode('utf-8'), addr)
-            
         except Exception as e:
             logger.error(f"Error handling UDP audio request from {addr}: {e}")
             self.send_error_response(addr, str(e))
