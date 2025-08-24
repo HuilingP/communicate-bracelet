@@ -985,8 +985,8 @@ UDP_SEND_NOTIFICATION_HOST = "172.20.10.11"  # 默认地址，可通过API配置
 UDP_SEND_NOTIFICATION_PORT = 4210  # 默认端口，可通过API配置
 
 # UDP控制开关
-UDP_NOTIFICATIONS_ENABLED = False  # 默认关闭UDP通知发送
-UDP_SERVER_ENABLED = False  # 默认关闭UDP服务器，避免意外数据流
+UDP_NOTIFICATIONS_ENABLED = True   # 默认启用UDP通知发送 - 这是系统的核心功能
+UDP_SERVER_ENABLED = False  # UDP服务器需要手动启动，避免意外数据流
 
 def send_udp_notification(message):
     """发送UDP通知消息"""

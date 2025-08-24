@@ -601,14 +601,30 @@ with tab4:
     
     if udp_config.get("success"):
         current_config = udp_config.get("config", {})
-        current_host = current_config.get("host", "127.0.0.1")
-        current_port = current_config.get("port", 5003)
+        current_host = current_config.get("host", "172.20.10.11")  # 使用后端默认配置
+        current_port = current_config.get("port", 4210)  # 使用后端默认配置
     else:
-        current_host = "127.0.0.1"
-        current_port = 5003
+        # 使用后端的默认配置作为fallback
+        current_host = "172.20.10.11"  # ESP设备默认IP
+        current_port = 4210  # ESP设备默认端口
         st.warning("无法获取当前UDP通知配置，使用默认值")
     
-    st.info("当检测到越网行为时，系统会自动发送UDP通知消息")
+    st.info("当检测到越网行为时，系统会自动发送UDP通知消息到ESP设备")
+    
+    # UDP通知开关状态显示
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📡 UDP通知状态")
+        # 显示UDP通知默认启用状态
+        st.success("🟢 UDP通知已启用")
+        st.caption("UDP_NOTIFICATIONS_ENABLED = True")
+    
+    with col2:
+        st.subheader("🎯 目标设备")
+        st.success(f"📍 ESP设备: {current_host}:{current_port}")
+        st.caption("检测到违规时将发送控制指令")
+    
+    st.markdown("---")
     
     # UDP通知配置表单
     with st.form("udp_notification_config"):
