@@ -798,6 +798,10 @@ class VADService:
 UDP_NOTIFICATION_HOST = "127.0.0.1"  # 默认地址，可通过API配置
 UDP_NOTIFICATION_PORT = 5003  # 默认端口，可通过API配置
 
+# UDP通知配置
+UDP_SEND_NOTIFICATION_HOST = "172.20.10.11"  # 默认地址，可通过API配置
+UDP_SEND_NOTIFICATION_PORT = 4210  # 默认端口，可通过API配置
+
 def send_udp_notification(message):
     """发送UDP通知消息"""
     try:
@@ -806,10 +810,10 @@ def send_udp_notification(message):
         sock.settimeout(1.0)  # 1秒超时
         
         # 发送消息
-        sock.sendto(message.encode('utf-8'), (UDP_NOTIFICATION_HOST, UDP_NOTIFICATION_PORT))
+        sock.sendto(message.encode('utf-8'), (UDP_SEND_NOTIFICATION_HOST, UDP_SEND_NOTIFICATION_PORT))
         sock.close()
         
-        logger.info(f"UDP notification sent to {UDP_NOTIFICATION_HOST}:{UDP_NOTIFICATION_PORT}: {message}")
+        logger.info(f"UDP notification sent to {UDP_SEND_NOTIFICATION_HOST}:{UDP_SEND_NOTIFICATION_PORT}: {message}")
         return True
         
     except Exception as e:

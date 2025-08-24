@@ -475,6 +475,42 @@ with tab3:
     if udp_data.get("success") and udp_data.get("data"):
         data_list = udp_data["data"]
         
+        # 检查是否有未分析的文本数据，如果有则自动触发LLM分析
+        auto_analyze_count = 0
+        for item in data_list:
+            # 检查是否是文本数据且未分析
+            if (item.get("type") == "text" or 
+                (isinstance(item.get("data"), str) and not item.get("data", "").startswith("<binary"))) and \
+               "analysis_result" not in item:
+                
+                text_data = item.get("data", "")
+                if text_data and len(text_data.strip()) > 0:
+                    try:
+                        # 尝试解析JSON或直接使用文本
+                        if text_data.startswith('{'):
+                            json_data = json.loads(text_data)
+                            analyze_text_content = json_data.get('text', text_data)
+                        else:
+                            analyze_text_content = text_data
+                        
+                        # 调用分析API
+                        with st.spinner(f"自动分析UDP数据包..."):
+                            result = analyze_text(analyze_text_content.strip())
+                            if result.get("success"):
+                                # 将分析结果添加到数据项中
+                                item["analysis_result"] = result
+                                auto_analyze_count += 1
+                                
+                                # 如果检测到越网行为，发送通知
+                                if result.get("binary_signal") == "1":
+                                    st.warning(f"🚨 检测到越网行为并已发送通知: {analyze_text_content[:50]}...")
+                                
+                    except Exception as e:
+                        st.error(f"自动分析失败: {str(e)}")
+        
+        if auto_analyze_count > 0:
+            st.success(f"✅ 自动分析了 {auto_analyze_count} 个UDP数据包")
+        
         # 显示统计信息
         col1, col2, col3, col4 = st.columns(4)
         with col1:
