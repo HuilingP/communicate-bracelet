@@ -431,26 +431,114 @@ class UDPOmniCallback(OmniRealtimeCallback):
                 transcript = response['transcript']
                 logger.info(f'UDP Audio transcription: {transcript}')
                 
-                # 使用LLM服务分析转录文本
-                analysis_result = llm_service.analyze_text(transcript)
-                
-                if analysis_result.get('success'):
-                    binary_signal = analysis_result.get('binary_signal', '0')
-                    logger.info(f'UDP Analysis result: {binary_signal}')
-                    
-                    # 记录UDP特定的日志
-                    with open("output.log", "a", encoding='utf-8') as f:
-                        f.write(f"UDP question: {transcript}\n")
-                        f.write(f"UDP LLM Response: {analysis_result.get('llm_response', '')}\n")
-                        f.write(f"{binary_signal}======UDP RESPONSE DONE======\n")
-                else:
-                    logger.error(f'UDP Analysis failed: {analysis_result.get("error")}')
+                # 异步处理分析和响应
+                threading.Thread(
+                    target=self._async_process_transcript,
+                    args=(transcript,),
+                    daemon=True
+                ).start()
             
             if 'response.done' == type:
                 logger.info('UDP Audio response completed')
                 
         except Exception as e:
             logger.error(f'Error in UDP audio callback: {e}')
+    
+    def _async_process_transcript(self, transcript):
+        """异步处理转录文本"""
+        try:
+            # 更新服务器统计信息
+            if hasattr(self.server, 'stats'):
+                self.server.stats["analysis_count"] += 1
+            
+            # 使用LLM服务分析转录文本
+            analysis_result = llm_service.analyze_text(transcript)
+            
+            if analysis_result.get('success'):
+                binary_signal = analysis_result.get('binary_signal', '0')
+                is_violation = analysis_result.get('is_violation', False)
+                
+                # 更新违规统计
+                if hasattr(self.server, 'stats') and is_violation:
+                    self.server.stats["violation_count"] += 1
+                
+                logger.info(f'UDP Analysis result: {binary_signal} (violation: {is_violation})')
+                
+                # 记录UDP特定的日志
+                with open("output.log", "a", encoding='utf-8') as f:
+                    f.write(f"UDP question: {transcript}\n")
+                    f.write(f"UDP LLM Response: {analysis_result.get('llm_response', '')}\n")
+                    f.write(f"{binary_signal}======UDP RESPONSE DONE======\n")
+                
+                # 异步发送UDP通知到ESP（优化：总是发送响应）
+                threading.Thread(
+                    target=self._send_notification_to_esp,
+                    args=(binary_signal, analysis_result, transcript),
+                    daemon=True
+                ).start()
+                
+            else:
+                logger.error(f'UDP Analysis failed: {analysis_result.get("error")}')
+                # 发送错误响应
+                threading.Thread(
+                    target=self._send_error_notification,
+                    args=(analysis_result.get("error", "Analysis failed"),),
+                    daemon=True
+                ).start()
+                
+        except Exception as e:
+            logger.error(f'Error in async transcript processing: {e}')
+            # 发送系统错误响应
+            threading.Thread(
+                target=self._send_error_notification,
+                args=(str(e),),
+                daemon=True
+            ).start()
+    
+    def _send_notification_to_esp(self, binary_signal, analysis_result, transcript):
+        """发送通知到ESP设备"""
+        try:
+            # 构建响应数据
+            response_data = {
+                "binary_signal": binary_signal,
+                "is_violation": analysis_result.get("is_violation", False),
+                "violation_type": analysis_result.get("violation_type", "none"),
+                "explanation": analysis_result.get("explanation", ""),
+                "transcript": transcript,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # 发送JSON响应到ESP
+            response_json = json.dumps(response_data, ensure_ascii=False)
+            
+            # 如果检测到违规，发送特殊信号
+            if binary_signal == "1":
+                send_udp_notification("-red")  # 发送红色警告
+                logger.info(f"Sent violation notification to ESP: {transcript[:50]}...")
+            else:
+                send_udp_notification("-green")  # 发送绿色正常信号
+                logger.info(f"Sent normal notification to ESP: {transcript[:50]}...")
+                
+        except Exception as e:
+            logger.error(f'Error sending notification to ESP: {e}')
+    
+    def _send_error_notification(self, error_msg):
+        """发送错误通知到ESP设备"""
+        try:
+            # 构建错误响应数据
+            error_data = {
+                "binary_signal": "0",
+                "is_violation": False,
+                "error": error_msg,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # 发送错误信号
+            send_udp_notification("-yellow")  # 发送黄色错误信号
+            logger.warning(f"Sent error notification to ESP: {error_msg}")
+                
+        except Exception as e:
+            logger.error(f'Error sending error notification to ESP: {e}')
 
 class UDPAnalysisServer:
     def __init__(self, host='0.0.0.0', port=5002):
@@ -459,11 +547,36 @@ class UDPAnalysisServer:
         self.socket = None
         self.running = False
         self.audio_buffer = b''
-        self.buffer_size = 32000
+        self.buffer_size = 3200  # 优化缓冲区大小，更快处理
         self.conversation = None
         self.callback = None
         self.active_threads = []
         self.server_thread = None
+        
+        # ESP设备地址缓存
+        self.esp_clients = {}  # {addr: last_seen_time}
+        self.esp_cleanup_interval = 300  # 5分钟清理不活跃的客户端
+        
+        # 性能统计
+        self.stats = {
+            "total_requests": 0,
+            "audio_requests": 0,
+            "text_requests": 0,
+            "analysis_count": 0,
+            "violation_count": 0,
+            "start_time": time.time(),
+            "last_activity": time.time()
+        }
+        
+        # 异步任务队列管理
+        self.max_concurrent_tasks = 10  # 最大并发任务数
+        self.current_tasks = 0
+        self.task_lock = threading.Lock()
+        
+        # 流程优化配置
+        self.enable_fast_response = True  # 启用快速响应模式
+        self.response_timeout = 5.0  # 响应超时时间（秒）
+        self.batch_processing = False  # 批处理模式（暂时关闭）
         
         # 初始化音频处理
         self.init_audio_processing()
@@ -643,22 +756,91 @@ class UDPAnalysisServer:
             self.send_error_response(addr, str(e))
     
     def handle_audio_request(self, audio_data, addr):
-        """处理音频请求"""
+        """处理音频请求 - 优化版本"""
         try:
-            logger.info(f"Received UDP {len(audio_data)} bytes of audio from {addr}")
+            # 更新统计信息
+            self.stats["audio_requests"] += 1
+            self.stats["total_requests"] += 1
             
-            # 将音频数据添加到缓冲区
-            self.audio_buffer += audio_data
+            # 更新ESP客户端记录
+            self.esp_clients[addr] = time.time()
             
-            # 当缓冲区达到3200字节时处理
-            while len(self.audio_buffer) >= self.buffer_size:
-                chunk = self.audio_buffer[:self.buffer_size]
-                self.audio_buffer = self.audio_buffer[self.buffer_size:]
-                self.process_audio_chunk(chunk)
+            logger.debug(f"Received UDP {len(audio_data)} bytes of audio from {addr}")
+            
+            # 异步处理音频数据，避免阻塞主循环
+            threading.Thread(
+                target=self._async_process_audio,
+                args=(audio_data, addr),
+                daemon=True
+            ).start()
             
         except Exception as e:
             logger.error(f"Error handling UDP audio request from {addr}: {e}")
             self.send_error_response(addr, str(e))
+    
+    def _async_process_audio(self, audio_data, addr):
+        """异步处理音频数据"""
+        try:
+            # 检查并发任务限制
+            with self.task_lock:
+                if self.current_tasks >= self.max_concurrent_tasks:
+                    logger.warning(f"Max concurrent tasks reached, dropping audio from {addr}")
+                    return
+                self.current_tasks += 1
+            
+            try:
+                # 更新活动时间
+                self.stats["last_activity"] = time.time()
+                
+                # 将音频数据添加到缓冲区
+                self.audio_buffer += audio_data
+                
+                # 当缓冲区达到指定大小时处理
+                while len(self.audio_buffer) >= self.buffer_size:
+                    chunk = self.audio_buffer[:self.buffer_size]
+                    self.audio_buffer = self.audio_buffer[self.buffer_size:]
+                    
+                    # 异步处理音频块
+                    self.process_audio_chunk(chunk)
+                    
+                    # 记录处理的音频块
+                    logger.debug(f"Processed {len(chunk)} bytes audio chunk from {addr}")
+                
+            finally:
+                # 释放任务计数
+                with self.task_lock:
+                    self.current_tasks -= 1
+            
+        except Exception as e:
+            logger.error(f"Error in async audio processing from {addr}: {e}")
+            # 确保释放任务计数
+            with self.task_lock:
+                if self.current_tasks > 0:
+                    self.current_tasks -= 1
+    
+    def get_server_stats(self):
+        """获取服务器统计信息"""
+        return {
+            "stats": self.stats.copy(),
+            "active_clients": len(self.esp_clients),
+            "active_threads": len([t for t in self.active_threads if t.is_alive()]),
+            "buffer_size": len(self.audio_buffer),
+            "running": self.running
+        }
+    
+    def cleanup_inactive_clients(self):
+        """清理不活跃的客户端"""
+        current_time = time.time()
+        inactive_clients = [
+            addr for addr, last_seen in self.esp_clients.items()
+            if current_time - last_seen > self.esp_cleanup_interval
+        ]
+        
+        for addr in inactive_clients:
+            del self.esp_clients[addr]
+            logger.info(f"Cleaned up inactive client: {addr}")
+        
+        return len(inactive_clients)
     
     def send_error_response(self, addr, error_msg):
         """发送错误响应"""
@@ -802,8 +984,17 @@ UDP_NOTIFICATION_PORT = 5003  # 默认端口，可通过API配置
 UDP_SEND_NOTIFICATION_HOST = "172.20.10.11"  # 默认地址，可通过API配置
 UDP_SEND_NOTIFICATION_PORT = 4210  # 默认端口，可通过API配置
 
+# UDP控制开关
+UDP_NOTIFICATIONS_ENABLED = False  # 默认关闭UDP通知发送
+UDP_SERVER_ENABLED = False  # 默认关闭UDP服务器，避免意外数据流
+
 def send_udp_notification(message):
     """发送UDP通知消息"""
+    # 检查UDP通知是否启用
+    if not UDP_NOTIFICATIONS_ENABLED:
+        logger.info(f"UDP notifications disabled, skipping: {message}")
+        return True
+        
     try:
         # 创建UDP socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1129,6 +1320,44 @@ def set_udp_notification_config():
         
     except Exception as e:
         logger.error(f"Error updating UDP notification config: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/udp/stats', methods=['GET'])
+def get_udp_stats():
+    """获取UDP服务器统计信息"""
+    try:
+        if udp_server:
+            stats = udp_server.get_server_stats()
+            return jsonify({
+                "success": True,
+                "stats": stats
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "UDP server not initialized"
+            })
+    except Exception as e:
+        logger.error(f"Error getting UDP stats: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/udp/cleanup', methods=['POST'])
+def cleanup_udp_clients():
+    """清理不活跃的UDP客户端"""
+    try:
+        if udp_server and udp_server.running:
+            cleaned_count = udp_server.cleanup_inactive_clients()
+            return jsonify({
+                "success": True,
+                "message": f"Cleaned up {cleaned_count} inactive clients"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "UDP server not running"
+            })
+    except Exception as e:
+        logger.error(f"Error cleaning up UDP clients: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/udp/notification/test', methods=['POST'])
